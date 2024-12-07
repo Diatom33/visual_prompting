@@ -9,7 +9,6 @@ import wandb
 
 import torch
 import torch.backends.cudnn as cudnn
-from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR100
 
@@ -166,7 +165,7 @@ def main():
                                 weight_decay=args.weight_decay)
 
     criterion = torch.nn.CrossEntropyLoss().to(device)
-    scaler = GradScaler()
+    scaler = torch.GradScaler('cuda')
     total_steps = len(train_loader) * args.epochs
     scheduler = cosine_lr(optimizer, args.learning_rate, args.warmup, total_steps)
 
@@ -257,7 +256,7 @@ def train(train_loader, texts, model, prompter, optimizer, scheduler, criterion,
         text_tokens = clip.tokenize(texts).to(device)
 
         # with automatic mixed precision
-        with autocast():
+        with torch.autocast('cuda'):
             prompted_images = prompter(images)
             output, _ = model(prompted_images, text_tokens)
             loss = criterion(output, target)
