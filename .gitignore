@@ -135,3 +135,4 @@ my_commands.txt
 data/*
 save/models/*
 wandb/*
+sweep_results.txt

@@ -84,7 +84,7 @@ def parse_option():
     parser.add_argument('--use_wandb', default=False,
                         action="store_true",
                         help='whether to use wandb')
-    parser.add_argument('--alpha', type=float, default=0.5,
+    parser.add_argument('--alpha', type=float, default=0.3,
                         help='relative weighting of distillation loss components')
     parser.add_argument('--teacher', type=str, default='./save/models/base/model_best.pth.tar',
                         help='teacher student for distillation')
@@ -340,8 +340,8 @@ def train(train_loader, texts, student, teacher, prompter, optimizer, scheduler,
 def validate(val_loader, texts, student, teacher, prompter, criterion, args):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
-    top1_teacher = AverageMeter('Original Acc@1', ':6.2f')
-    top1_student = AverageMeter('Prompt Acc@1', ':6.2f')
+    top1_teacher = AverageMeter('Teacher Acc@1', ':6.2f')
+    top1_student = AverageMeter('Student Acc@1', ':6.2f')
     progress = ProgressMeter(
         len(val_loader),
         [batch_time, losses, top1_teacher, top1_student],
