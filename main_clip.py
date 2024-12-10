@@ -46,8 +46,8 @@ def parse_option():
                         help='momentum')
     parser.add_argument('--patience', type=int, default=40)
 
-    # model
-    parser.add_argument('--model', type=str, default='clip')
+    # student
+    parser.add_argument('--student', type=str, default='clip')
     parser.add_argument('--arch', type=str, default='vit_b32')
     parser.add_argument('--method', type=str, default='padding',
                         choices=['padding', 'random_patch', 'fixed_patch'],
@@ -78,7 +78,7 @@ def parse_option():
                         help='path to resume from checkpoint')
     parser.add_argument('--evaluate', default=False,
                         action="store_true",
-                        help='evaluate model test set')
+                        help='evaluate student test set')
     parser.add_argument('--gpu', type=int, default=None,
                         help='gpu to use')
     parser.add_argument('--use_wandb', default=False,
@@ -87,12 +87,12 @@ def parse_option():
     parser.add_argument('--alpha', default=0.5,
                         help='relative weighting of distillation loss components')
     parser.add_argument('--teacher',default='./save/models/base/model_best.pth.tar',
-                        help='teacher model for distillation')
+                        help='teacher student for distillation')
 
     args = parser.parse_args()
 
     args.filename = '{}_{}_{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_warmup_{}_trial_{}_alpha_{}'. \
-        format(args.method, args.prompt_size, args.dataset, args.model, args.arch,
+        format(args.method, args.prompt_size, args.dataset, args.student, args.arch,
                args.optim, args.learning_rate, args.weight_decay, args.batch_size, args.warmup, args.trial,args.alpha)
 
     return args
@@ -112,12 +112,15 @@ def main():
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
 
-    # create model
-    model, preprocess = clip.load('ViT-B/32', device, jit=False)
-    convert_models_to_fp32(model)
-    model.eval()
+    # create student
+    student, preprocess = clip.load('ViT-B/32', device, jit=False)
+    teacher, preprocess = clip.load('ViT-B/32', device, jit=False)
+    convert_models_to_fp32(student)
+    convert_models_to_fp32(teacher)
+    teacher.eval()
 
     prompter = prompters.__dict__[args.method](args).to(device)
+    prompter.eval()
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -126,7 +129,7 @@ def main():
             if args.gpu is None:
                 checkpoint = torch.load(args.resume)
             else:
-                # Map model to be loaded to specified single gpu.
+                # Map student to be loaded to specified single gpu.
                 loc = 'cuda:{}'.format(args.gpu)
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
@@ -134,11 +137,26 @@ def main():
             if args.gpu is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
                 best_acc1 = best_acc1.to(args.gpu)
-            prompter.load_state_dict(checkpoint['state_dict'])
+            student.load_state_dict(checkpoint['student'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
+    
+    if args.teacher:
+        if os.path.isfile(args.teacher):
+            print("=> loading teacher '{}'".format(args.teacher))
+            if args.gpu is None:
+                checkpoint = torch.load(args.teacher)
+            else:
+                # Map teacher to be loaded to specified single gpu.
+                loc = 'cuda:{}'.format(args.gpu)
+                checkpoint = torch.load(args.teacher, map_location=loc)
+            prompter.load_state_dict(checkpoint['state_dict'])
+            print("=> loaded checkpoint '{}'"
+                  .format(args.teacher))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.teacher))
 
     # create data
     template = 'This is a photo of a {}'
@@ -163,7 +181,7 @@ def main():
     texts = [template.format(label) for label in class_names]
 
     # define criterion and optimizer
-    optimizer = torch.optim.SGD(prompter.parameters(),
+    optimizer = torch.optim.SGD(student.parameters(),
                                 lr=args.learning_rate,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
@@ -206,7 +224,7 @@ def main():
         wandb.watch(prompter, criterion, log='all', log_freq=10)
 
     if args.evaluate:
-        acc1 = validate(val_loader, texts, model, prompter, criterion, args)
+        acc1 = validate(val_loader, texts, student, prompter, criterion, args)
         return
 
     epochs_since_improvement = 0
@@ -214,10 +232,10 @@ def main():
     for epoch in range(args.epochs):
 
         # train for one epoch
-        train(train_loader, texts, model, prompter, optimizer, scheduler, criterion, scaler, epoch, args)
+        train(train_loader, texts, student, teacher, prompter, optimizer, scheduler, criterion, scaler, epoch, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, texts, model, prompter, criterion, args)
+        acc1 = validate(val_loader, texts, student, prompter, criterion, args)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -228,6 +246,7 @@ def main():
             'state_dict': prompter.state_dict(),
             'best_acc1': best_acc1,
             'optimizer': optimizer.state_dict(),
+            'student': student.state_dict(),
         }, args, is_best=is_best)
 
         if is_best:
@@ -243,7 +262,7 @@ def main():
     wandb.run.finish()
 
 
-def train(train_loader, texts, model, prompter, optimizer, scheduler, criterion, scaler, epoch, args):
+def train(train_loader, texts, student, teacher, prompter, optimizer, scheduler, criterion, scaler, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -254,7 +273,7 @@ def train(train_loader, texts, model, prompter, optimizer, scheduler, criterion,
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
-    prompter.train()
+    student.train()
 
     num_batches_per_epoch = len(train_loader)
 
@@ -277,14 +296,15 @@ def train(train_loader, texts, model, prompter, optimizer, scheduler, criterion,
         # with automatic mixed precision
         with torch.autocast('cuda'):
             prompted_images = prompter(images)
-            output, _ = model(prompted_images, text_tokens)
-            loss = criterion(output, target)
+            output, _ = student(images, text_tokens)
+            teacher, _ = teacher(prompted_images,text_tokens)
+            loss = criterion(teacher, output, target)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
         scaler.update()
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
-        model.logit_scale.data = torch.clamp(model.logit_scale.data, 0, 4.6052)
+        student.logit_scale.data = torch.clamp(student.logit_scale.data, 0, 4.6052)
 
         # measure accuracy
         acc1 = accuracy(output, target, topk=(1,))
@@ -310,12 +330,13 @@ def train(train_loader, texts, model, prompter, optimizer, scheduler, criterion,
                 'state_dict': prompter.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer': optimizer.state_dict(),
+                'student': student.state_dict(),
             }, args)
 
     return losses.avg, top1.avg
 
 
-def validate(val_loader, texts, model, prompter, criterion, args):
+def validate(val_loader, texts, student, prompter, criterion, args):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1_org = AverageMeter('Original Acc@1', ':6.2f')
@@ -326,7 +347,7 @@ def validate(val_loader, texts, model, prompter, criterion, args):
         prefix='Validate: ')
 
     # switch to evaluation mode
-    prompter.eval()
+    student.eval()
 
     with torch.no_grad():
         end = time.time()
@@ -338,8 +359,8 @@ def validate(val_loader, texts, model, prompter, criterion, args):
             prompted_images = prompter(images)
 
             # compute output
-            output_prompt, _ = model(prompted_images, text_tokens)
-            output_org, _ = model(images, text_tokens)
+            output_prompt, _ = student(prompted_images, text_tokens)
+            output_org, _ = student(images, text_tokens)
             loss = criterion(output_prompt, target)
 
             # measure accuracy and record loss
