@@ -127,3 +127,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# shortcut commands
+my_commands.txt
+
+# other stuff that ain't need to get committed
+data/*
+save/models/*
+wandb/*

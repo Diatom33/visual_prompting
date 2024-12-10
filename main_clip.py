@@ -30,7 +30,7 @@ def parse_option():
                         help='batch_size')
     parser.add_argument('--num_workers', type=int, default=16,
                         help='num of workers to use')
-    parser.add_argument('--epochs', type=int, default=1000,
+    parser.add_argument('--epochs', type=int, default=400,
                         help='number of training epoch5s')
 
     # optimization
@@ -44,7 +44,7 @@ def parse_option():
                         help="number of steps to warmup for")
     parser.add_argument('--momentum', type=float, default=0.9,
                         help='momentum')
-    parser.add_argument('--patience', type=int, default=1000)
+    parser.add_argument('--patience', type=int, default=40)
 
     # model
     parser.add_argument('--model', type=str, default='clip')
