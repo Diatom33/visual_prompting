@@ -28,7 +28,7 @@ def parse_option():
                         help='save frequency')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=16,
+    parser.add_argument('--num_workers', type=int, default=12,
                         help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=400,
                         help='number of training epoch5s')
@@ -36,7 +36,7 @@ def parse_option():
     # optimization
     parser.add_argument('--optim', type=str, default='sgd',
                         help='optimizer to use')
-    parser.add_argument('--learning_rate', type=float, default=40,
+    parser.add_argument('--learning_rate', type=float, default=0.004,
                         help='learning rate')
     parser.add_argument("--weight_decay", type=float, default=0,
                         help="weight decay")
@@ -84,9 +84,9 @@ def parse_option():
     parser.add_argument('--use_wandb', default=False,
                         action="store_true",
                         help='whether to use wandb')
-    parser.add_argument('--alpha', default=0.5,
+    parser.add_argument('--alpha', type=float, default=0.5,
                         help='relative weighting of distillation loss components')
-    parser.add_argument('--teacher',default='./save/models/base/model_best.pth.tar',
+    parser.add_argument('--teacher', type=str, default='./save/models/base/model_best.pth.tar',
                         help='teacher student for distillation')
 
     args = parser.parse_args()
@@ -186,7 +186,7 @@ def main():
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
-    # criterion = torch.nn.CrossEntropyLoss().to(device)
+    val_criterion = torch.nn.CrossEntropyLoss().to(device)
     class distillation(torch.nn.Module):
         def __init__(self, alpha) -> None:
             """
@@ -195,10 +195,10 @@ def main():
             super().__init__()
             self.alpha=alpha
             self.CE=torch.nn.CrossEntropyLoss()
-            self.KL=torch.nn.KLDivLoss()
+            self.KL=torch.nn.KLDivLoss(reduction='batchmean')
 
         def forward(self, teacher, student, target):
-            return self.alpha*self.CE(student, target)+(1-self.alpha)*self.KL(student, teacher)
+            return self.alpha*self.CE(student, target)+(1-self.alpha)*self.KL(torch.nn.functional.log_softmax(student), torch.nn.functional.softmax(teacher))
         
     criterion = distillation(args.alpha).to(device)
 
@@ -224,7 +224,7 @@ def main():
         wandb.watch(prompter, criterion, log='all', log_freq=10)
 
     if args.evaluate:
-        acc1 = validate(val_loader, texts, student, prompter, criterion, args)
+        acc1 = validate(val_loader, texts, student, teacher, prompter, val_criterion, args)
         return
 
     epochs_since_improvement = 0
@@ -235,7 +235,7 @@ def main():
         train(train_loader, texts, student, teacher, prompter, optimizer, scheduler, criterion, scaler, epoch, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, texts, student, prompter, criterion, args)
+        acc1 = validate(val_loader, texts, student, teacher, prompter, val_criterion, args)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -297,11 +297,12 @@ def train(train_loader, texts, student, teacher, prompter, optimizer, scheduler,
         with torch.autocast('cuda'):
             prompted_images = prompter(images)
             output, _ = student(images, text_tokens)
-            teacher, _ = teacher(prompted_images,text_tokens)
-            loss = criterion(teacher, output, target)
+            teacher_out, _ = teacher(prompted_images,text_tokens)
+            loss = criterion(teacher_out, output, target)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
         scaler.update()
+        # print(output,teacher_out,torch.nn.functional.kl_div(torch.nn.functional.log_softmax(output), torch.nn.functional.softmax(teacher_out)))
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         student.logit_scale.data = torch.clamp(student.logit_scale.data, 0, 4.6052)
@@ -336,14 +337,14 @@ def train(train_loader, texts, student, teacher, prompter, optimizer, scheduler,
     return losses.avg, top1.avg
 
 
-def validate(val_loader, texts, student, prompter, criterion, args):
+def validate(val_loader, texts, student, teacher, prompter, criterion, args):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
-    top1_org = AverageMeter('Original Acc@1', ':6.2f')
-    top1_prompt = AverageMeter('Prompt Acc@1', ':6.2f')
+    top1_teacher = AverageMeter('Original Acc@1', ':6.2f')
+    top1_student = AverageMeter('Prompt Acc@1', ':6.2f')
     progress = ProgressMeter(
         len(val_loader),
-        [batch_time, losses, top1_org, top1_prompt],
+        [batch_time, losses, top1_teacher, top1_student],
         prefix='Validate: ')
 
     # switch to evaluation mode
@@ -359,17 +360,17 @@ def validate(val_loader, texts, student, prompter, criterion, args):
             prompted_images = prompter(images)
 
             # compute output
-            output_prompt, _ = student(prompted_images, text_tokens)
-            output_org, _ = student(images, text_tokens)
-            loss = criterion(output_prompt, target)
+            student_out, _ = student(images, text_tokens)
+            teacher_out, _ = teacher(prompted_images, text_tokens)
+            loss = criterion(student_out, target)
 
             # measure accuracy and record loss
-            acc1 = accuracy(output_prompt, target, topk=(1,))
+            acc1 = accuracy(student_out, target, topk=(1,))
             losses.update(loss.item(), images.size(0))
-            top1_prompt.update(acc1[0].item(), images.size(0))
+            top1_student.update(acc1[0].item(), images.size(0))
 
-            acc1 = accuracy(output_org, target, topk=(1,))
-            top1_org.update(acc1[0].item(), images.size(0))
+            acc1 = accuracy(teacher_out, target, topk=(1,))
+            top1_teacher.update(acc1[0].item(), images.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -378,17 +379,17 @@ def validate(val_loader, texts, student, prompter, criterion, args):
             if i % args.print_freq == 0:
                 progress.display(i)
 
-        print(' * Prompt Acc@1 {top1_prompt.avg:.3f} Original Acc@1 {top1_org.avg:.3f}'
-              .format(top1_prompt=top1_prompt, top1_org=top1_org))
+        print(' * Student Acc@1 {top1_student.avg:.3f} Teacher Acc@1 {top1_teacher.avg:.3f}'
+              .format(top1_student=top1_student, top1_teacher=top1_teacher))
 
         if args.use_wandb:
             wandb.log({
                 'val_loss': losses.avg,
-                'val_acc_prompt': top1_prompt.avg,
-                'val_acc_org': top1_org.avg,
+                'val_acc_prompt': top1_student.avg,
+                'val_acc_org': top1_teacher.avg,
             })
 
-    return top1_prompt.avg
+    return top1_student.avg
 
 
 if __name__ == '__main__':
