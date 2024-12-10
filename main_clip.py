@@ -84,12 +84,16 @@ def parse_option():
     parser.add_argument('--use_wandb', default=False,
                         action="store_true",
                         help='whether to use wandb')
+    parser.add_argument('--alpha', default=0.5,
+                        help='relative weighting of distillation loss components')
+    parser.add_argument('--teacher',default='./save/models/base/model_best.pth.tar',
+                        help='teacher model for distillation')
 
     args = parser.parse_args()
 
-    args.filename = '{}_{}_{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_warmup_{}_trial_{}'. \
+    args.filename = '{}_{}_{}_{}_{}_{}_lr_{}_decay_{}_bsz_{}_warmup_{}_trial_{}_alpha_{}'. \
         format(args.method, args.prompt_size, args.dataset, args.model, args.arch,
-               args.optim, args.learning_rate, args.weight_decay, args.batch_size, args.warmup, args.trial)
+               args.optim, args.learning_rate, args.weight_decay, args.batch_size, args.warmup, args.trial,args.alpha)
 
     return args
 
@@ -164,7 +168,22 @@ def main():
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
-    criterion = torch.nn.CrossEntropyLoss().to(device)
+    # criterion = torch.nn.CrossEntropyLoss().to(device)
+    class distillation(torch.nn.Module):
+        def __init__(self, alpha) -> None:
+            """
+            distillation loss
+            """
+            super().__init__()
+            self.alpha=alpha
+            self.CE=torch.nn.CrossEntropyLoss()
+            self.KL=torch.nn.KLDivLoss()
+
+        def forward(self, teacher, student, target):
+            return self.alpha*self.CE(student, target)+(1-self.alpha)*self.KL(student, teacher)
+        
+    criterion = distillation(args.alpha).to(device)
+
     scaler = torch.GradScaler('cuda')
     total_steps = len(train_loader) * args.epochs
     scheduler = cosine_lr(optimizer, args.learning_rate, args.warmup, total_steps)
