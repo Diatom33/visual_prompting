@@ -1,5 +1,5 @@
 # Visual Prompting
-This is the official implementation of the paper [Exploring Visual Prompts for Adapting Large-Scale Models](https://arxiv.org/abs/2203.17274). 
+This is my partially debugged and somewhat customized version of the official implementation of the paper [Exploring Visual Prompts for Adapting Large-Scale Models](https://arxiv.org/abs/2203.17274). This is mostly for use in my other project found [here](https://github.com/Diatom33/perturbation-internalization), but I might do multiple things with this.
 
 ![](./figures/clip_vs_vision.png)
 
@@ -7,7 +7,7 @@ This is the official implementation of the paper [Exploring Visual Prompts for A
 ## Installation
 Clone this repo:
 ```bash
-git clone https://github.com/hjbahng/visual_prompting.git
+git clone https://github.com/Diatom33/visual_prompting.git
 cd visual_prompting
 ```
 
